@@ -54,6 +54,13 @@ export const appMessageOverrides = {
   userCreateError: 'Could not create the user. Please try again.',
   userCreatedAssignmentFailed:
     'User created, but role/team assignment failed. Edit the user to retry.',
+  userCreatedGroupsFailed:
+    'User created, but some groups could not be assigned. Save again to retry for this user, or close and edit the user later. Practitioner ID:',
+  userUpdatedGroupsFailed:
+    'Profile saved, but some group changes failed. Save again to retry. Failed groups:',
+  userIamMissing: 'This practitioner has no linked IAM user. Contact your administrator.',
+  userGroupNotFound: 'A selected group is no longer available. Reload the groups and try again.',
+  userGroupsReadFailed: 'Current groups could not be read. Nothing was changed. Please try again.',
   userSaveError: 'Could not save the user. Please try again.',
   validationRequiredGiven: 'Given name is required.',
   validationRequiredFamily: 'Family name is required.',

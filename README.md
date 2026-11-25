@@ -15,6 +15,29 @@ Monorepo for the **OHS Player Web** portal: the publishable **`ohs-player-web-co
 
 See [docs/QUICKSTART.md](docs/QUICKSTART.md).
 
+## User group assignment
+
+The create and edit drawers send IAM membership as `groupIds` to `/api/users`.
+The edit and details drawers load current membership from
+`GET /api/users/{PractitionerId}/groups`, independently of practitioner details.
+This requires the backend user-groups endpoint; practitioner details are not a
+membership source. Group roles are shown only with `groups.view`.
+
+Deploy [backend PR #107](https://github.com/ohs-foundation/ohs-player-reference-backend/pull/107)
+before deploying these frontend changes.
+
+An omitted `groupIds` leaves membership unchanged; an empty array removes every
+group. If membership cannot be loaded, the edit drawer shows an error and omits
+`groupIds`, allowing profile changes without replacing unknown membership.
+
+Backend failures distinguish an unchanged user from a saved profile with incomplete
+group changes. The drawer keeps the selected groups available for retry and lists
+failed group IDs. If creation partially succeeds, it also shows the new Practitioner
+ID and sends subsequent saves through `PUT` for that user, avoiding a second `POST`.
+Closing the drawer discards the local retry state; edit the existing user to retry
+later. Incomplete group syncs are audited as incomplete, rather than as completed
+membership changes.
+
 ## License
 
 See [LICENSE](LICENSE).

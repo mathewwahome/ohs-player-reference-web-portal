@@ -1,5 +1,5 @@
 import { useMemo } from 'react';
-import { useCustomResource } from 'ohs-player-web-core';
+import { useCustomResource, usePermission } from 'ohs-player-web-core';
 import type { Option } from './userFormOptions';
 
 export interface IamGroup {
@@ -23,9 +23,12 @@ export interface GrantedRole {
 }
 
 function toGroups(data: unknown): IamGroup[] {
-  const list = Array.isArray(data) ? data : ((data as { groups?: unknown } | undefined)?.groups ?? []);
+  const list = Array.isArray(data)
+    ? data
+    : ((data as { groups?: unknown } | undefined)?.groups ?? []);
   return (Array.isArray(list) ? list : []).filter(
-    (g): g is IamGroup => typeof (g as IamGroup)?.id === 'string' && typeof (g as IamGroup)?.name === 'string',
+    (g): g is IamGroup =>
+      typeof (g as IamGroup)?.id === 'string' && typeof (g as IamGroup)?.name === 'string',
   );
 }
 
@@ -42,13 +45,26 @@ export function useGroups(enabled = true): {
   return { groups, options, isLoading: enabled && query.isLoading, error: query.error };
 }
 
+/** Memberships are keyed by FHIR Practitioner ID, not Keycloak user ID. */
+export function useUserGroups(practitionerId: string, enabled = true) {
+  const query = useCustomResource('users', undefined, {
+    enabled: enabled && Boolean(practitionerId),
+    pathSegments: [practitionerId, 'groups'],
+  });
+  const groups = useMemo(() => toGroups(query.data), [query.data]);
+  return { groups, isLoading: enabled && query.isLoading, error: query.error };
+}
+
 /** The roles the given groups grant, with descriptions looked up from the `roles` gateway alias. */
 export function useGrantedRoles(groups: readonly IamGroup[]): {
   roles: GrantedRole[];
   isLoading: boolean;
   error: unknown;
 } {
-  const query = useCustomResource('roles', undefined, { enabled: groups.length > 0 });
+  const canViewRoles = usePermission('groups.view').can;
+  const query = useCustomResource('roles', undefined, {
+    enabled: canViewRoles && groups.length > 0,
+  });
   const roles = useMemo(() => {
     const catalog = query.data as RolesResponse | undefined;
     const described = new Map<string, string>();
@@ -61,7 +77,7 @@ export function useGrantedRoles(groups: readonly IamGroup[]): {
       }
     }
     const granted = new Map<string, GrantedRole>();
-    for (const g of groups) {
+    for (const g of canViewRoles ? groups : []) {
       for (const name of g.realmRoles ?? []) {
         granted.set(name, { key: name, name, description: described.get(name) });
       }
@@ -73,6 +89,10 @@ export function useGrantedRoles(groups: readonly IamGroup[]): {
       }
     }
     return [...granted.values()];
-  }, [groups, query.data]);
-  return { roles, isLoading: groups.length > 0 && query.isLoading, error: query.error };
+  }, [groups, query.data, canViewRoles]);
+  return {
+    roles,
+    isLoading: canViewRoles && groups.length > 0 && query.isLoading,
+    error: query.error,
+  };
 }

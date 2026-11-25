@@ -9,8 +9,12 @@ import {
 } from 'ohs-player-web-core';
 import { PRACTITIONER_ROLE_SYSTEM } from '../../config/roles';
 import { useWriteAudit } from '../audit/useWriteAudit';
-import { buildNewUserBundle, buildNewUserPayload, type NewUserFields } from '../sdc/resourceFromAnswers';
-import { userErrorMessage } from '../sdc/toErrorMessage';
+import {
+  buildNewUserBundle,
+  buildNewUserPayload,
+  type NewUserFields,
+} from '../sdc/resourceFromAnswers';
+import { groupSyncFailure, userErrorMessage } from '../sdc/toErrorMessage';
 import {
   type Option,
   locationOptions,
@@ -75,12 +79,14 @@ export function groupDescription(
   return ids.map((id) => groups.find((g) => g.id === id)?.name ?? id).join(', ') || 'none';
 }
 
-export function useUserCreateForm(onSuccess: (created?: { id?: string } & Record<string, unknown>) => void): UserCreateFormState {
+export function useUserCreateForm(
+  onSuccess: (created?: { id?: string } & Record<string, unknown>) => void,
+): UserCreateFormState {
   const { t } = useTranslation();
   const client = useFhirClient();
   const writeAudit = useWriteAudit();
   const status = useStatusBar();
-  const { post } = useCustomEndpoint('users');
+  const { post, put } = useCustomEndpoint('users');
 
   const canAssignGroups = usePermission('users.edit').can;
   const groupList = useGroups(canAssignGroups);
@@ -88,7 +94,10 @@ export function useUserCreateForm(onSuccess: (created?: { id?: string } & Record
   const locSearch = useSearch('Location', { _count: '500', status: 'active' });
   const careTeamSearch = useSearch('CareTeam', { _count: '200' });
 
-  const orgOptions = useMemo(() => referenceOptions(orgSearch.data, 'Organization'), [orgSearch.data]);
+  const orgOptions = useMemo(
+    () => referenceOptions(orgSearch.data, 'Organization'),
+    [orgSearch.data],
+  );
   const locOptions = useMemo(
     () => locationOptions(locationsFromBundle(locSearch.data), t),
     [locSearch.data, t],
@@ -103,8 +112,9 @@ export function useUserCreateForm(onSuccess: (created?: { id?: string } & Record
   );
   const careTeamById = useMemo(() => {
     const map = new Map<string, Record<string, unknown>>();
-    for (const e of (careTeamSearch.data as { entry?: { resource?: Record<string, unknown> }[] } | undefined)
-      ?.entry ?? []) {
+    for (const e of (
+      careTeamSearch.data as { entry?: { resource?: Record<string, unknown> }[] } | undefined
+    )?.entry ?? []) {
       const r = e.resource;
       const cid = typeof r?.id === 'string' ? r.id : '';
       if (r && cid) map.set(cid, r);
@@ -128,6 +138,7 @@ export function useUserCreateForm(onSuccess: (created?: { id?: string } & Record
   const [error, setError] = useState<string | null>(null);
   const [fieldErrors, setFieldErrors] = useState<UserFormErrors>({});
   const [submitting, setSubmitting] = useState(false);
+  const [recovery, setRecovery] = useState<{ id: string; username: string } | null>(null);
 
   const clearError = (key: keyof UserFormErrors) =>
     setFieldErrors((prev) => (prev[key] ? { ...prev, [key]: undefined } : prev));
@@ -165,6 +176,7 @@ export function useUserCreateForm(onSuccess: (created?: { id?: string } & Record
   });
 
   const submit = (): void => {
+    if (submitting) return;
     setError(null);
     const errors = validateUserForm(formValues, t, { enforceUsername: true });
     setFieldErrors(errors);
@@ -175,7 +187,16 @@ export function useUserCreateForm(onSuccess: (created?: { id?: string } & Record
     void (async () => {
       setSubmitting(true);
       try {
-        const created = (await post.mutateAsync(buildNewUserPayload(fields))) as Record<string, unknown>;
+        const payload = buildNewUserPayload(fields, recovery?.username);
+        const created = recovery
+          ? {
+              ...((await put.mutateAsync({ id: recovery.id, body: payload })) as Record<
+                string,
+                unknown
+              >),
+              id: recovery.id,
+            }
+          : ((await post.mutateAsync(payload)) as Record<string, unknown>);
         const createdId = typeof created.id === 'string' ? created.id : '';
 
         let assignmentFailed = false;
@@ -193,7 +214,9 @@ export function useUserCreateForm(onSuccess: (created?: { id?: string } & Record
           }
         }
 
-        const kcId = (created.identifier as { value?: string }[] | undefined)?.find((i) => i.value)?.value;
+        const kcId = (created.identifier as { value?: string }[] | undefined)?.find(
+          (i) => i.value,
+        )?.value;
         if (fields.groupIds?.length) {
           await writeAudit({
             action: 'update',
@@ -203,15 +226,33 @@ export function useUserCreateForm(onSuccess: (created?: { id?: string } & Record
           });
         }
         await writeAudit({
-          action: 'create',
+          action: recovery ? 'update' : 'create',
           resourceType: 'Practitioner',
           resourceId: createdId || undefined,
-          description: kcId ? `User created via backend (Keycloak ${kcId})` : 'User created via backend',
+          description: recovery
+            ? 'User group assignment retried via backend'
+            : kcId
+              ? `User created via backend (Keycloak ${kcId})`
+              : 'User created via backend',
         });
 
-        if (assignmentFailed) status.notify({ tone: 'warning', title: t('userCreatedAssignmentFailed') });
+        if (assignmentFailed)
+          status.notify({ tone: 'warning', title: t('userCreatedAssignmentFailed') });
         onSuccess(created);
       } catch (err) {
+        const partial = groupSyncFailure(err);
+        if (partial?.kind === 'create' && partial.practitionerId) {
+          setRecovery({
+            id: partial.practitionerId,
+            username: buildNewUserPayload(fields).username,
+          });
+          void writeAudit({
+            action: 'create',
+            resourceType: 'Practitioner',
+            resourceId: partial.practitionerId,
+            description: `User created; group assignment incomplete for groups: [${partial.groupIds}]`,
+          }).catch(() => undefined);
+        }
         const message = userErrorMessage(err, t, 'userCreateError');
         setError(message);
         status.notify({ tone: 'error', title: message });
@@ -225,9 +266,7 @@ export function useUserCreateForm(onSuccess: (created?: { id?: string } & Record
     options.find((o) => o.value === value)?.label ?? value;
 
   const labelsForValues = (options: readonly Option[], values: string[]): string =>
-    values.length > 0
-      ? values.map((v) => labelForOption(options, v)).join(', ')
-      : t('detailNone');
+    values.length > 0 ? values.map((v) => labelForOption(options, v)).join(', ') : t('detailNone');
 
   return {
     given,

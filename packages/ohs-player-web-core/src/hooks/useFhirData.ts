@@ -203,7 +203,9 @@ export function useDeleteResource(resourceType: string) {
  * await refresh('CareTeam');                           // one type
  * await refresh(['Practitioner', 'PractitionerRole']); // several
  */
-export function useRefreshResources(): (resourceTypes: string | readonly string[]) => Promise<void> {
+export function useRefreshResources(): (
+  resourceTypes: string | readonly string[],
+) => Promise<void> {
   const qc = useQueryClient();
   return useCallback(
     async (resourceTypes: string | readonly string[]) => {
@@ -262,12 +264,16 @@ function scheduleReconcile(spec: ReconcileSpec): () => void {
 
   const present = (): boolean =>
     qc
-      .getQueriesData<SearchBundleShape>({ predicate: (q) => searchKeyMatcher(resourceType)(q.queryKey) })
+      .getQueriesData<SearchBundleShape>({
+        predicate: (q) => searchKeyMatcher(resourceType)(q.queryKey),
+      })
       .some(([, bundle]) => bundle?.entry?.some((e) => e.resource?.id === id));
 
   const refetchAll = (): Promise<unknown> =>
     Promise.all(
-      types.map((type) => qc.refetchQueries({ predicate: (q) => searchKeyMatcher(type)(q.queryKey) })),
+      types.map((type) =>
+        qc.refetchQueries({ predicate: (q) => searchKeyMatcher(type)(q.queryKey) }),
+      ),
     );
 
   const onRefetched = (n: number): void => {
@@ -400,28 +406,38 @@ export function useOptimisticInsert(): (
 export function useCustomResource(
   alias: string,
   params?: Record<string, string | number | boolean | undefined>,
-  options?: { enabled?: boolean },
+  options?: { enabled?: boolean; pathSegments?: readonly string[] },
 ): UseQueryResult<unknown> {
   const client = useFhirClient();
   return useQuery({
-    queryKey: ['custom', alias, params],
+    queryKey: options?.pathSegments
+      ? ['custom', alias, params, options.pathSegments]
+      : ['custom', alias, params],
     enabled: options?.enabled ?? true,
-    queryFn: async () => client.customGet(alias, params),
+    queryFn: async () =>
+      options?.pathSegments
+        ? client.customGet(alias, params, options.pathSegments)
+        : client.customGet(alias, params),
   });
 }
 
 export function useCustomEndpoint(alias: string) {
   const client = useFhirClient();
+  const qc = useQueryClient();
+  // Errors can represent partial writes; refresh memberships on either outcome.
+  const refresh = () => qc.invalidateQueries({ queryKey: ['custom', alias] });
   const get = useMutation({
     mutationFn: async (params?: Record<string, string | number | boolean | undefined>) =>
       client.customGet(alias, params),
   });
   const post = useMutation({
     mutationFn: async (body: unknown) => client.customPost(alias, body),
+    onSettled: refresh,
   });
   const put = useMutation({
     mutationFn: async (vars: { id?: string; body: unknown }) =>
       client.customPut(alias, vars.body, vars.id),
+    onSettled: refresh,
   });
   return { get, post, put };
 }

@@ -24,7 +24,11 @@ import {
   useTranslation,
 } from 'ohs-player-web-core';
 import { useWriteAudit } from '../audit/useWriteAudit';
-import { GENDER_OPTIONS, PRACTITIONER_ROLE_CODES, PRACTITIONER_ROLE_SYSTEM } from '../../config/roles';
+import {
+  GENDER_OPTIONS,
+  PRACTITIONER_ROLE_CODES,
+  PRACTITIONER_ROLE_SYSTEM,
+} from '../../config/roles';
 import {
   buildNewUserPayload,
   buildUserEditBundle,
@@ -32,14 +36,8 @@ import {
   type NewUserFields,
   usernameFromEmail,
 } from '../sdc/resourceFromAnswers';
-import { userErrorMessage } from '../sdc/toErrorMessage';
-import {
-  MultiSelect,
-  RadioRow,
-  Section,
-  StackedInput,
-  StackedSelect,
-} from './userFormControls';
+import { groupSyncFailure, userErrorMessage } from '../sdc/toErrorMessage';
+import { MultiSelect, RadioRow, Section, StackedInput, StackedSelect } from './userFormControls';
 import {
   type Option,
   locationOptions,
@@ -48,7 +46,7 @@ import {
 } from './userFormOptions';
 import { todayIso, type UserFormErrors, validateUserForm } from './userFormSchema';
 import { usePractitionerDetails } from './usePractitionerDetails';
-import { useGroups } from './useGroups';
+import { useGroups, useUserGroups } from './useGroups';
 import { groupDescription } from './useUserCreateForm';
 import { UserGroupPicker } from './UserGroupPicker';
 
@@ -82,17 +80,21 @@ export function UserEditDrawer({
     roleDetails,
     roles,
     careTeams,
-    groups: currentGroups,
     isLoading,
     error: loadError,
   } = usePractitionerDetails(id);
   const canAssignGroups = usePermission('users.edit').can;
   const groupList = useGroups(canAssignGroups);
+  const membership = useUserGroups(id);
+  const currentGroups = membership.groups;
   const orgSearch = useSearch('Organization', { _count: '200', active: 'true' });
   const locSearch = useSearch('Location', { _count: '500', status: 'active' });
   const careTeamSearch = useSearch('CareTeam', { _count: '200' });
 
-  const orgOptions = useMemo(() => referenceOptions(orgSearch.data, 'Organization'), [orgSearch.data]);
+  const orgOptions = useMemo(
+    () => referenceOptions(orgSearch.data, 'Organization'),
+    [orgSearch.data],
+  );
   const locOptions = useMemo(
     () =>
       locationOptions(
@@ -184,16 +186,24 @@ export function UserEditDrawer({
     setRole(roles[0]?.code?.[0]?.coding?.[0]?.code ?? '');
     setOrgs(unique(roles.map((r) => r.organization?.reference ?? '').filter(Boolean)));
     setLocations(
-      unique(roles.flatMap((r) => (r.location ?? []).map((l) => l.reference ?? '')).filter(Boolean)),
+      unique(
+        roles.flatMap((r) => (r.location ?? []).map((l) => l.reference ?? '')).filter(Boolean),
+      ),
     );
     setCareTeamIds(originalCareTeamIds);
-    setGroupIds(originalGroupIds);
     setHydrated(true);
   }, [hydrated, practitioner, isLoading, roles, originalCareTeamIds, originalGroupIds]);
 
+  const [groupsHydrated, setGroupsHydrated] = useState(false);
+  useEffect(() => {
+    if (groupsHydrated || membership.isLoading || membership.error) return;
+    setGroupIds(originalGroupIds);
+    setGroupsHydrated(true);
+  }, [groupsHydrated, membership.isLoading, membership.error, originalGroupIds]);
+
   const submit = (): void => {
     setError(null);
-    if (!practitioner) return;
+    if (!practitioner || submitting) return;
     const errors = validateUserForm(
       {
         givenName: given,
@@ -233,6 +243,8 @@ export function UserEditDrawer({
 
     const groupsChanged =
       canAssignGroups &&
+      groupsHydrated &&
+      !membership.error &&
       (groupIds.length !== originalGroupIds.length ||
         groupIds.some((gid) => !originalGroupIds.includes(gid)));
 
@@ -245,7 +257,11 @@ export function UserEditDrawer({
         if (groupsChanged) payload.groupIds = groupIds;
         await put.mutateAsync({ id, body: payload });
         // FHIR handles only what the gateway doesn't: PractitionerRoles + CareTeam membership.
-        const bundle = buildUserEditBundle(id, fields, { existingRoleIds, careTeamAdds, careTeamRemoves });
+        const bundle = buildUserEditBundle(id, fields, {
+          existingRoleIds,
+          careTeamAdds,
+          careTeamRemoves,
+        });
         if (bundle.entry.length > 0) await commitBundle(client, bundle.entry);
         await writeAudit({ action: 'update', resourceType: 'Practitioner', resourceId: id });
         if (groupsChanged) {
@@ -259,6 +275,15 @@ export function UserEditDrawer({
         }
         onSuccess();
       } catch (err) {
+        const partial = groupSyncFailure(err);
+        if (partial) {
+          void writeAudit({
+            action: 'update',
+            resourceType: 'Practitioner',
+            resourceId: id,
+            description: `Profile updated; group sync incomplete for groups: [${partial.groupIds}]`,
+          }).catch(() => undefined);
+        }
         const message = userErrorMessage(err, t, 'userSaveError');
         setError(message);
         status.notify({ tone: 'error', title: message });
@@ -284,7 +309,12 @@ export function UserEditDrawer({
       <Button variant="outlined" type="button" onClick={onClose} disabled={submitting}>
         {t('cancel')}
       </Button>
-      <Button type="button" onClick={submit} loading={submitting} disabled={submitting || !practitioner}>
+      <Button
+        type="button"
+        onClick={submit}
+        loading={submitting}
+        disabled={submitting || !practitioner}
+      >
         {t('save')}
       </Button>
     </div>
@@ -403,7 +433,9 @@ export function UserEditDrawer({
               options={orgOptions}
               value={orgs}
               onChange={setOrgs}
-              placeholder={orgOptions.length > 0 ? t('selectPlaceholder') : t('assignmentsNeedOrgs')}
+              placeholder={
+                orgOptions.length > 0 ? t('selectPlaceholder') : t('assignmentsNeedOrgs')
+              }
             />
           </Section>
 
@@ -432,8 +464,8 @@ export function UserEditDrawer({
             options={groupOptionsWithCurrent}
             value={groupIds}
             onChange={setGroupIds}
-            isLoading={groupList.isLoading}
-            error={groupList.error}
+            isLoading={groupList.isLoading || membership.isLoading}
+            error={membership.error || groupList.error}
             warnOnEmpty={originalGroupIds.length > 0}
           />
         </form>

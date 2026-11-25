@@ -32,6 +32,21 @@ describe('FhirClient.customPut', () => {
 
     await makeClient().customPut('users', {});
 
-    expect((fetchMock.mock.calls[0] as unknown as [string])[0]).toBe('http://localhost:5173/api/users');
+    expect((fetchMock.mock.calls[0] as unknown as [string])[0]).toBe(
+      'http://localhost:5173/api/users',
+    );
+  });
+});
+
+describe('FhirClient.customGet subresources', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('encodes each path segment separately and includes auth', async () => {
+    const fetchMock = vi.fn(() => Promise.resolve(new Response('[]', { status: 200 })));
+    vi.stubGlobal('fetch', fetchMock);
+    await makeClient().customGet('users', undefined, ['p/1', 'groups']);
+    const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toBe('http://localhost:5173/api/users/p%2F1/groups');
+    expect((init.headers as Headers).get('Authorization')).toBe('Bearer tok');
   });
 });

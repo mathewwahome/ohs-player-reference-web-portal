@@ -28,7 +28,7 @@ import {
 import { useWriteAudit } from '../audit/useWriteAudit';
 import { buildDeactivateBundle, NATIONAL_ID_IDENTIFIER_SYSTEM } from '../sdc/resourceFromAnswers';
 import { usePractitionerDetails } from './usePractitionerDetails';
-import { useGrantedRoles } from './useGroups';
+import { useGrantedRoles, useUserGroups } from './useGroups';
 
 function Field({ label, value }: Readonly<{ label: string; value?: string }>): React.ReactElement {
   return (
@@ -70,8 +70,10 @@ export function UserDetailsDrawer({
   const status = useStatusBar();
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [deactivating, setDeactivating] = useState(false);
-  const { practitioner, roleDetails, roles, careTeams, groups, isLoading, error } =
+  const { practitioner, roleDetails, roles, careTeams, isLoading, error } =
     usePractitionerDetails(id);
+  const membership = useUserGroups(id);
+  const groups = membership.groups;
   const granted = useGrantedRoles(groups);
 
   const details = useMemo(() => {
@@ -251,7 +253,11 @@ export function UserDetailsDrawer({
             )}
           </Section>
           <Section icon={IconTeam} title={t('sectionGroups')}>
-            {groups.length > 0 ? (
+            {membership.isLoading ? (
+              <Spinner label={t('groupsLoading')} />
+            ) : membership.error ? (
+              <ErrorState description={t('groupsLoadError')} />
+            ) : groups.length > 0 ? (
               <div className="ohs-detail-list">
                 {groups.map((g) => (
                   <div className="ohs-detail-rel" key={g.id}>
@@ -259,6 +265,7 @@ export function UserDetailsDrawer({
                     <span className="ohs-detail-rel__title">{g.name}</span>
                   </div>
                 ))}
+                <PermissionGuard permission="groups.view">
                 <h3 className="ohs-detail-field__label">{t('groupsRolesGranted')}</h3>
                 {granted.isLoading ? (
                   <Spinner label={t('loading')} />
@@ -280,6 +287,7 @@ export function UserDetailsDrawer({
                 ) : (
                   <p className="ohs-detail-empty">{t('detailNone')}</p>
                 )}
+                </PermissionGuard>
               </div>
             ) : (
               <p className="ohs-detail-empty">{t('detailNone')}</p>

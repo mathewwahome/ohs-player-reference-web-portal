@@ -10,6 +10,11 @@ const mockNotify = vi.fn();
 const mockUseCustomResource = vi.fn();
 const mockUseResource = vi.fn();
 const mockUseSearch = vi.fn();
+const membershipQuery: { data?: unknown; isLoading: boolean; error?: unknown } = {
+  data: [],
+  isLoading: false,
+};
+const mockDenied = new Set<string>();
 const mockFhirClient = { transaction: mockTransaction, baseUrl: '' };
 
 vi.mock('ohs-player-web-core', async (): Promise<object> => {
@@ -27,8 +32,9 @@ vi.mock('ohs-player-web-core', async (): Promise<object> => {
     useAuth: () => ({ status: 'authenticated', user: { preferred_username: 'tester' } }),
     useStatusBar: () => ({ notify: mockNotify }),
     writeAuditEvent: (...args: unknown[]) => mockWriteAuditEvent(...args) as unknown,
-    PermissionGuard: ({ children }: { children: ReactNode }) => children,
-    usePermission: () => ({ can: true, roles: [] }),
+    PermissionGuard: ({ children, permission }: { children: ReactNode; permission: string }) =>
+      mockDenied.has(permission) ? null : children,
+    usePermission: (permission: string) => ({ can: !mockDenied.has(permission), roles: [] }),
     useCustomResource: (...args: unknown[]) => mockUseCustomResource(...args) as unknown,
     useResource: (...args: unknown[]) => mockUseResource(...args) as unknown,
     useSearch: (...args: unknown[]) => mockUseSearch(...args) as unknown,
@@ -90,14 +96,26 @@ function renderDrawer() {
 
 describe('UserDetailsDrawer', () => {
   beforeEach(() => {
+    mockDenied.clear();
+    Object.assign(membershipQuery, { data: [], isLoading: false, error: undefined });
     mockTransaction.mockReset().mockResolvedValue({});
     mockWriteAuditEvent.mockReset().mockResolvedValue(undefined);
     mockNotify.mockReset();
-    mockUseCustomResource.mockReset().mockImplementation((alias: string) =>
-      alias === 'roles'
-        ? { ...idle, data: { realmRoles: [{ name: 'GET_PATIENT', description: 'Read patients' }], clients: [] } }
-        : { ...idle, data: detailsResponse },
-    );
+    mockUseCustomResource
+      .mockReset()
+      .mockImplementation((alias: string) =>
+        alias === 'users'
+          ? membershipQuery
+          : alias === 'roles'
+            ? {
+                ...idle,
+                data: {
+                  realmRoles: [{ name: 'GET_PATIENT', description: 'Read patients' }],
+                  clients: [],
+                },
+              }
+            : { ...idle, data: detailsResponse },
+      );
     mockUseResource.mockReset().mockReturnValue(idle);
     mockUseSearch.mockReset().mockReturnValue(idle);
   });
@@ -170,9 +188,7 @@ describe('UserDetailsDrawer', () => {
 
   it('deactivates from the endpoint response and writes an audit event', async () => {
     const onDeleted = vi.fn();
-    render(
-      <UserDetailsDrawer id="p1" onClose={vi.fn()} onEdit={vi.fn()} onDeleted={onDeleted} />,
-    );
+    render(<UserDetailsDrawer id="p1" onClose={vi.fn()} onEdit={vi.fn()} onDeleted={onDeleted} />);
 
     fireEvent.click(screen.getByRole('button', { name: 'deactivateUser' }));
     fireEvent.click(screen.getByRole('button', { name: 'deactivate' }));
@@ -199,16 +215,25 @@ describe('UserDetailsDrawer', () => {
   });
 
   it('lists current groups and the roles they grant', () => {
+    membershipQuery.data = [{ id: 'g1', name: 'Clinicians', realmRoles: ['GET_PATIENT'] }];
     mockUseCustomResource.mockImplementation((alias: string) =>
-      alias === 'roles'
-        ? { ...idle, data: { realmRoles: [{ name: 'GET_PATIENT', description: 'Read patients' }], clients: [] } }
-        : {
-            ...idle,
-            data: {
-              ...detailsResponse,
-              groups: [{ id: 'g1', name: 'Clinicians', realmRoles: ['GET_PATIENT'] }],
+      alias === 'users'
+        ? membershipQuery
+        : alias === 'roles'
+          ? {
+              ...idle,
+              data: {
+                realmRoles: [{ name: 'GET_PATIENT', description: 'Read patients' }],
+                clients: [],
+              },
+            }
+          : {
+              ...idle,
+              data: {
+                ...detailsResponse,
+                groups: [{ id: 'g1', name: 'Clinicians', realmRoles: ['GET_PATIENT'] }],
+              },
             },
-          },
     );
 
     renderDrawer();
@@ -216,6 +241,30 @@ describe('UserDetailsDrawer', () => {
     expect(screen.getByText('Clinicians')).toBeInTheDocument();
     expect(screen.getByText('GET_PATIENT')).toBeInTheDocument();
     expect(screen.getByText('Read patients')).toBeInTheDocument();
+  });
+
+  it('loads memberships using the Practitioner ID', () => {
+    renderDrawer();
+    expect(mockUseCustomResource).toHaveBeenCalledWith('users', undefined, {
+      enabled: true,
+      pathSegments: ['p1', 'groups'],
+    });
+  });
+
+  it('shows a membership error while keeping practitioner details visible', () => {
+    membershipQuery.error = new FhirError('IAM user not found for Practitioner', 422, {});
+    renderDrawer();
+    expect(screen.getByText('groupsLoadError')).toBeInTheDocument();
+    expect(screen.getByText('jane@example.com')).toBeInTheDocument();
+  });
+
+  it('hides group roles and disables the role catalog without groups.view', () => {
+    mockDenied.add('groups.view');
+    membershipQuery.data = [{ id: 'g1', name: 'Clinicians', realmRoles: ['GET_PATIENT'] }];
+    renderDrawer();
+    expect(screen.getByText('Clinicians')).toBeInTheDocument();
+    expect(screen.queryByText('groupsRolesGranted')).not.toBeInTheDocument();
+    expect(mockUseCustomResource).toHaveBeenCalledWith('roles', undefined, { enabled: false });
   });
 
   it('has no critical accessibility violations', async () => {

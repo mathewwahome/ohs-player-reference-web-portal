@@ -117,7 +117,8 @@ export class FhirClient {
     } else if (body && typeof body === 'object') {
       // Gateway custom routes (/api/*) return a plain JSON error, e.g. `{ "error": "...", "status": 409 }`.
       const b = body as { error?: unknown; message?: unknown };
-      const m = typeof b.error === 'string' ? b.error : typeof b.message === 'string' ? b.message : '';
+      const m =
+        typeof b.error === 'string' ? b.error : typeof b.message === 'string' ? b.message : '';
       if (m) message = m;
     } else if (typeof body === 'string' && body.trim()) {
       message = body;
@@ -265,7 +266,7 @@ export class FhirClient {
   async customGet(
     alias: string,
     params?: Record<string, string | number | boolean | undefined>,
-    idSegment?: string,
+    idSegment?: string | readonly string[],
   ): Promise<unknown> {
     const path = this.customEndpoints[alias];
     if (!path) throw new Error(`Unknown custom endpoint alias: ${alias}`);
@@ -284,7 +285,9 @@ export class FhirClient {
         )}`
       : '';
     const base = `${root}${path.startsWith('/') ? path : `/${path}`}`;
-    const url = `${idSegment ? `${base}/${encodeURIComponent(idSegment)}` : base}${qs}`;
+    const segments = typeof idSegment === 'string' ? [idSegment] : (idSegment ?? []);
+    const suffix = segments.map((segment) => `/${encodeURIComponent(segment)}`).join('');
+    const url = `${base}${suffix}${qs}`;
     const res = await this.fetchWithAuth(url, { method: 'GET' });
     if (!res.ok) throw await this.toError(res);
     return readBody(res);

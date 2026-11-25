@@ -61,8 +61,17 @@ const groupsQuery: { data?: unknown; isLoading: boolean; error?: unknown } = {
   isLoading: false,
   error: undefined,
 };
+const membershipQuery: { data?: unknown; isLoading: boolean; error?: unknown } = {
+  data: [],
+  isLoading: false,
+};
+beforeEach(() => Object.assign(membershipQuery, { data: [], isLoading: false, error: undefined }));
+
 const rolesQuery = {
-  data: { realmRoles: [{ id: 'r1', name: 'GET_PATIENT', description: 'Read patients' }], clients: [] },
+  data: {
+    realmRoles: [{ id: 'r1', name: 'GET_PATIENT', description: 'Read patients' }],
+    clients: [],
+  },
   isLoading: false,
   error: undefined,
 };
@@ -107,7 +116,13 @@ vi.mock('ohs-player-web-core', async (): Promise<object> => {
     useCreateResource: () => ({ mutateAsync: mockCreateResource, isPending: false }),
     usePermission: () => ({ can: !mockDenied.has('users.edit'), roles: [] }),
     useCustomResource: (alias: string) =>
-      alias === 'groups' ? groupsQuery : alias === 'roles' ? rolesQuery : practitionerDetails,
+      alias === 'users'
+        ? membershipQuery
+        : alias === 'groups'
+          ? groupsQuery
+          : alias === 'roles'
+            ? rolesQuery
+            : practitionerDetails,
     useResource: (_resourceType: string | undefined, resourceId?: string) => ({
       data: resourceId ? mockPractitioner : undefined,
       isLoading: false,
@@ -737,6 +752,7 @@ describe('Group assignment', () => {
     mockWriteAuditEvent.mockReset().mockResolvedValue(undefined);
     mockDenied.clear();
     Object.assign(groupsQuery, { data: originalGroups, isLoading: false, error: undefined });
+    membershipQuery.data = [{ id: 'g1', name: 'Clinicians' }];
     setPractitionerDetails({
       data: {
         practitioner: mockPractitioner,
@@ -761,9 +777,9 @@ describe('Group assignment', () => {
     await waitFor(() => expect(mockPost).toHaveBeenCalledTimes(1));
     expect((mockPost.mock.calls[0][0] as { groupIds?: string[] }).groupIds).toEqual(['g2']);
     await waitFor(() =>
-      expect(mockWriteAuditEvent.mock.calls.map((c) => (c[1] as { description?: string }).description)).toContain(
-        'Group membership set: Managers',
-      ),
+      expect(
+        mockWriteAuditEvent.mock.calls.map((c) => (c[1] as { description?: string }).description),
+      ).toContain('Group membership set: Managers'),
     );
   });
 
@@ -831,11 +847,67 @@ describe('Group assignment', () => {
     fireEvent.click(screen.getByRole('button', { name: 'save' }));
 
     await waitFor(() => expect(mockPut).toHaveBeenCalledTimes(1));
-    expect((mockPut.mock.calls[0][0] as { body: { groupIds?: string[] } }).body.groupIds).toEqual([]);
+    expect((mockPut.mock.calls[0][0] as { body: { groupIds?: string[] } }).body.groupIds).toEqual(
+      [],
+    );
     await waitFor(() => expect(mockWriteAuditEvent).toHaveBeenCalledTimes(2));
     expect((mockWriteAuditEvent.mock.calls[1][1] as { description?: string }).description).toBe(
       'Group membership changed: from [Clinicians] to [none]',
     );
+  });
+
+  it('shows membership read errors without sending a destructive group update', async () => {
+    Object.assign(membershipQuery, {
+      data: undefined,
+      error: new FhirError('IAM unavailable', 502, {}),
+    });
+    render(<UserEditDrawer id="p1" onClose={vi.fn()} onSuccess={vi.fn()} />);
+    await screen.findByDisplayValue('Jane');
+    expect(screen.getByText('groupsLoadError')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'save' }));
+    await waitFor(() => expect(mockPut).toHaveBeenCalledTimes(1));
+    expect((mockPut.mock.calls[0][0] as { body: object }).body).not.toHaveProperty('groupIds');
+  });
+
+  it('keeps a partial edit open and retries the selected groups', async () => {
+    const onSuccess = vi.fn();
+    mockPut.mockRejectedValueOnce(
+      new FhirError('Profile updated, but group sync failed for groups: [g1]', 502, {}),
+    );
+    render(<UserEditDrawer id="p1" onClose={vi.fn()} onSuccess={onSuccess} />);
+    await screen.findByDisplayValue('Jane');
+    fireEvent.click(screen.getByRole('button', { name: /removeAssignment Clinicians/ }));
+    fireEvent.click(screen.getByRole('button', { name: 'save' }));
+    await screen.findByText('userUpdatedGroupsFailed [g1]');
+    expect(onSuccess).not.toHaveBeenCalled();
+    expect(mockTransaction).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: 'save' }));
+    await waitFor(() => expect(onSuccess).toHaveBeenCalledOnce());
+    expect((mockPut.mock.calls[1][0] as { body: { groupIds?: string[] } }).body.groupIds).toEqual([]);
+  });
+
+  it('retries a partial create with PUT and never creates a second user', async () => {
+    const onSuccess = vi.fn();
+    mockPost.mockRejectedValueOnce(
+      new FhirError(
+        'User created (Practitioner p9), but group assignment failed for groups: [g2]',
+        502,
+        {},
+      ),
+    );
+    render(<UserCreateDrawer onClose={vi.fn()} onSuccess={onSuccess} />);
+    fillDemographics();
+    fireEvent.click(screen.getByRole('combobox', { name: /groupsLabel/ }));
+    fireEvent.click(screen.getByRole('option', { name: 'Managers' }));
+    fireEvent.click(screen.getByRole('button', { name: 'save' }));
+    await screen.findByText('userCreatedGroupsFailed (p9) [g2]');
+    expect(onSuccess).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole('button', { name: 'save' }));
+    await waitFor(() => expect(onSuccess).toHaveBeenCalledOnce());
+    expect(mockPost).toHaveBeenCalledOnce();
+    const retry = mockPut.mock.calls[0][0] as { id: string; body: { groupIds?: string[] } };
+    expect(retry.id).toBe('p9');
+    expect(retry.body.groupIds).toEqual(['g2']);
   });
 
   it('has no critical accessibility violations with the picker shown', async () => {
